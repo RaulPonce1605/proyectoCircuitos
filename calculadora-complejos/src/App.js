@@ -10,6 +10,9 @@ import {
   Zap,
   Trash2,
   Play,
+  Grid3x3,
+  Link,
+  RotateCw,
 } from "lucide-react";
 
 const ComplexCalculator = () => {
@@ -26,10 +29,16 @@ const ComplexCalculator = () => {
 
   // Estado para circuitos
   const [components, setComponents] = useState([]);
+  const [wires, setWires] = useState([]);
   const [selectedComponent, setSelectedComponent] = useState(null);
-  const [voltage, setVoltage] = useState(10);
+  const [draggingId, setDraggingId] = useState(null);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [connectingMode, setConnectingMode] = useState(false);
+  const [firstNode, setFirstNode] = useState(null);
   const [frequency, setFrequency] = useState(60);
   const [circuitResult, setCircuitResult] = useState(null);
+  const [meshEquations, setMeshEquations] = useState([]);
+  const gridSize = 40;
 
   // Operaciones con números complejos
   const add = (a, b, c, d) => ({ real: a + c, imag: b + d });
@@ -40,6 +49,7 @@ const ComplexCalculator = () => {
   });
   const divide = (a, b, c, d) => {
     const denom = c * c + d * d;
+    if (denom === 0) return { real: 0, imag: 0 };
     return {
       real: (a * c + b * d) / denom,
       imag: (b * c - a * d) / denom,
@@ -95,7 +105,7 @@ const ComplexCalculator = () => {
     const real = num.real.toFixed(2);
     const imag = Math.abs(num.imag).toFixed(2);
     const sign = num.imag >= 0 ? "+" : "-";
-    return `${real} ${sign} ${imag}i`;
+    return `${real} ${sign} ${imag}j`;
   };
 
   const formatPolar = (num) => {
@@ -105,13 +115,34 @@ const ComplexCalculator = () => {
   };
 
   // Funciones para circuitos
-  const addComponent = (type) => {
+  const snapToGrid = (value) => {
+    return Math.round(value / gridSize) * gridSize;
+  };
+
+  const addComponentToGrid = (type) => {
     const newComponent = {
       id: Date.now(),
       type,
-      value: type === "resistor" ? 100 : type === "capacitor" ? 0.001 : 0.1,
-      x: 150 + components.length * 80,
-      y: 200,
+      value:
+        type === "resistor"
+          ? 10
+          : type === "capacitor"
+          ? -2
+          : type === "inductor"
+          ? 1
+          : type === "ac_source"
+          ? 120
+          : type === "voltage_source"  
+          ? 120
+          : type === "current_source"
+          ? 10
+          : type === "current_source_dc"
+          ? 10
+          : 10,
+      phase: (type === "ac_source" || type === "current_source") ? 0 : undefined, // Ángulo de fase para AC
+      x: 240,
+      y: 240,
+      rotation: 0, // 0=horizontal derecha, 90=vertical abajo, 180=horizontal izquierda, 270=vertical arriba
     };
     setComponents([...components, newComponent]);
   };
@@ -124,15 +155,122 @@ const ComplexCalculator = () => {
     );
   };
 
+  const updateComponentPhase = (id, phase) => {
+    setComponents(
+      components.map((c) =>
+        c.id === id ? { ...c, phase: parseFloat(phase) || 0 } : c
+      )
+    );
+  };
+
+  const rotateComponent = (id) => {
+    setComponents(
+      components.map((c) =>
+        c.id === id ? { ...c, rotation: (c.rotation + 90) % 360 } : c
+      )
+    );
+  };
+
   const removeComponent = (id) => {
+    setWires(wires.filter((w) => w.fromComp !== id && w.toComp !== id));
     setComponents(components.filter((c) => c.id !== id));
   };
 
-  const solveCircuit = () => {
-    if (components.length === 0) return;
+  const getNodePosition = (comp, nodeNum) => {
+    const offset = 35;
+    const { x, y, rotation } = comp;
+
+    switch (rotation) {
+      case 0: // Horizontal →
+        return nodeNum === 1 ? { x: x - offset, y } : { x: x + offset, y };
+      case 90: // Vertical ↓
+        return nodeNum === 1 ? { x, y: y - offset } : { x, y: y + offset };
+      case 180: // Horizontal ←
+        return nodeNum === 1 ? { x: x + offset, y } : { x: x - offset, y };
+      case 270: // Vertical ↑
+        return nodeNum === 1 ? { x, y: y + offset } : { x, y: y - offset };
+      default:
+        return { x, y };
+    }
+  };
+
+  // Manejo de drag & drop CORREGIDO
+  const handleComponentMouseDown = (e, comp) => {
+    if (connectingMode) return;
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const svg = e.currentTarget.ownerSVGElement;
+    const rect = svg.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    setDraggingId(comp.id);
+    setDragStart({
+      x: mouseX - comp.x,
+      y: mouseY - comp.y,
+    });
+  };
+
+  const handleCanvasMouseMove = (e) => {
+    if (!draggingId) return;
+
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    const newX = snapToGrid(mouseX - dragStart.x);
+    const newY = snapToGrid(mouseY - dragStart.y);
+
+    setComponents(
+      components.map((c) =>
+        c.id === draggingId ? { ...c, x: newX, y: newY } : c
+      )
+    );
+  };
+
+  const handleCanvasMouseUp = () => {
+    setDraggingId(null);
+  };
+
+  const handleNodeClick = (e, comp, nodeNum) => {
+    e.stopPropagation();
+    e.preventDefault();
+
+    if (!connectingMode) return;
+
+    const nodeId = `${comp.id}-${nodeNum}`;
+
+    if (!firstNode) {
+      setFirstNode({ compId: comp.id, nodeNum, nodeId });
+    } else {
+      if (firstNode.nodeId !== nodeId) {
+        const newWire = {
+          id: Date.now(),
+          fromComp: firstNode.compId,
+          fromNode: firstNode.nodeNum,
+          toComp: comp.id,
+          toNode: nodeNum,
+        };
+        setWires([...wires, newWire]);
+      }
+      setFirstNode(null);
+      setConnectingMode(false);
+    }
+  };
+
+  // Análisis de circuitos
+  const solveCircuitByMesh = () => {
+    if (components.length === 0) {
+      alert("Agrega componentes al circuito primero");
+      return;
+    }
 
     const omega = 2 * Math.PI * frequency;
     let totalZ = { real: 0, imag: 0 };
+    let totalVoltage = 0;
 
     components.forEach((comp) => {
       let z = { real: 0, imag: 0 };
@@ -142,39 +280,62 @@ const ComplexCalculator = () => {
           z = { real: comp.value, imag: 0 };
           break;
         case "capacitor":
-          const Xc = -1 / (omega * comp.value);
-          z = { real: 0, imag: Xc };
+          z = { real: 0, imag: comp.value };
           break;
         case "inductor":
-          const Xl = omega * comp.value;
-          z = { real: 0, imag: Xl };
+          z = { real: 0, imag: comp.value };
+          break;
+        case "voltage_source":
+        case "ac_source":
+          totalVoltage += comp.value;
           break;
       }
 
       totalZ = add(totalZ.real, totalZ.imag, z.real, z.imag);
     });
 
-    const magnitude = Math.sqrt(
-      totalZ.real * totalZ.real + totalZ.imag * totalZ.imag
-    );
-    const current = divide(voltage, 0, totalZ.real, totalZ.imag);
+    const current = divide(totalVoltage, 0, totalZ.real, totalZ.imag);
     const currentMag = Math.sqrt(
       current.real * current.real + current.imag * current.imag
     );
+    const impedanceMag = Math.sqrt(
+      totalZ.real * totalZ.real + totalZ.imag * totalZ.imag
+    );
     const phase = Math.atan2(totalZ.imag, totalZ.real) * (180 / Math.PI);
+    const currentPhase =
+      Math.atan2(current.imag, current.real) * (180 / Math.PI);
     const powerFactor = Math.cos((phase * Math.PI) / 180);
+
+    const apparentPower = totalVoltage * currentMag;
+    const activePower = apparentPower * powerFactor;
+    const reactivePower = apparentPower * Math.sin((phase * Math.PI) / 180);
+
+    const equation = `${totalVoltage}V = I × (${formatComplex(totalZ)}) Ω`;
+
+    setMeshEquations([
+      {
+        mesh: 1,
+        equation: equation,
+        current: current,
+      },
+    ]);
 
     setCircuitResult({
       impedance: totalZ,
-      impedanceMag: magnitude,
-      current,
-      currentMag,
-      phase,
-      powerFactor,
+      impedanceMag: impedanceMag,
+      current: current,
+      currentMag: currentMag,
+      phase: phase,
+      currentPhase: currentPhase,
+      powerFactor: powerFactor,
+      apparentPower: apparentPower,
+      activePower: activePower,
+      reactivePower: reactivePower,
+      voltage: totalVoltage,
     });
   };
 
-  // Componente de gráfica para calculadora
+  // Componente del plano complejo
   const ComplexPlane = () => {
     const width = 500;
     const height = 500;
@@ -210,6 +371,36 @@ const ComplexCalculator = () => {
               strokeWidth="0.5"
             />
           </pattern>
+          <marker
+            id="arrowhead1"
+            markerWidth="10"
+            markerHeight="10"
+            refX="9"
+            refY="3"
+            orient="auto"
+          >
+            <path d="M0,0 L0,6 L9,3 z" fill="#3b82f6" />
+          </marker>
+          <marker
+            id="arrowhead2"
+            markerWidth="10"
+            markerHeight="10"
+            refX="9"
+            refY="3"
+            orient="auto"
+          >
+            <path d="M0,0 L0,6 L9,3 z" fill="#10b981" />
+          </marker>
+          <marker
+            id="arrowhead3"
+            markerWidth="10"
+            markerHeight="10"
+            refX="9"
+            refY="3"
+            orient="auto"
+          >
+            <path d="M0,0 L0,6 L9,3 z" fill="#f59e0b" />
+          </marker>
         </defs>
         <rect width={width} height={height} fill="url(#grid)" />
 
@@ -256,27 +447,13 @@ const ComplexCalculator = () => {
           y2={z1Pos.y}
           stroke="#3b82f6"
           strokeWidth="3"
-          opacity="0.8"
-          markerEnd="url(#arrowblue)"
+          markerEnd="url(#arrowhead1)"
         />
-        <circle
-          cx={z1Pos.x}
-          cy={z1Pos.y}
-          r="6"
-          fill="#3b82f6"
-          className="drop-shadow-lg"
-        />
-        <text
-          x={z1Pos.x + 12}
-          y={z1Pos.y - 8}
-          fill="#3b82f6"
-          fontSize="14"
-          fontWeight="bold"
-        >
+        <text x={z1Pos.x + 10} y={z1Pos.y - 5} fill="#3b82f6" fontWeight="bold">
           z₁
         </text>
 
-        {operation !== "conjugate" && operation !== "power" && (
+        {operation !== "conjugate" && (
           <>
             <line
               x1={center.x}
@@ -285,21 +462,12 @@ const ComplexCalculator = () => {
               y2={z2Pos.y}
               stroke="#10b981"
               strokeWidth="3"
-              opacity="0.8"
-              markerEnd="url(#arrowgreen)"
-            />
-            <circle
-              cx={z2Pos.x}
-              cy={z2Pos.y}
-              r="6"
-              fill="#10b981"
-              className="drop-shadow-lg"
+              markerEnd="url(#arrowhead2)"
             />
             <text
-              x={z2Pos.x + 12}
-              y={z2Pos.y - 8}
+              x={z2Pos.x + 10}
+              y={z2Pos.y - 5}
               fill="#10b981"
-              fontSize="14"
               fontWeight="bold"
             >
               z₂
@@ -316,857 +484,1305 @@ const ComplexCalculator = () => {
               y2={resPos.y}
               stroke="#f59e0b"
               strokeWidth="4"
-              opacity="0.9"
-              markerEnd="url(#arroworange)"
+              markerEnd="url(#arrowhead3)"
               strokeDasharray="5,5"
             />
-            <circle
-              cx={resPos.x}
-              cy={resPos.y}
-              r="8"
-              fill="#f59e0b"
-              className="drop-shadow-xl"
-            />
             <text
-              x={resPos.x + 12}
+              x={resPos.x + 10}
               y={resPos.y + 20}
               fill="#f59e0b"
-              fontSize="16"
               fontWeight="bold"
+              fontSize="16"
             >
               Resultado
             </text>
           </>
         )}
 
-        <defs>
-          <marker
-            id="arrowblue"
-            markerWidth="10"
-            markerHeight="10"
-            refX="9"
-            refY="3"
-            orient="auto"
-            markerUnits="strokeWidth"
-          >
-            <path d="M0,0 L0,6 L9,3 z" fill="#3b82f6" />
-          </marker>
-          <marker
-            id="arrowgreen"
-            markerWidth="10"
-            markerHeight="10"
-            refX="9"
-            refY="3"
-            orient="auto"
-            markerUnits="strokeWidth"
-          >
-            <path d="M0,0 L0,6 L9,3 z" fill="#10b981" />
-          </marker>
-          <marker
-            id="arroworange"
-            markerWidth="10"
-            markerHeight="10"
-            refX="9"
-            refY="3"
-            orient="auto"
-            markerUnits="strokeWidth"
-          >
-            <path d="M0,0 L0,6 L9,3 z" fill="#f59e0b" />
-          </marker>
-        </defs>
-
-        <circle
-          cx={center.x}
-          cy={center.y}
-          r={scale}
-          fill="none"
-          stroke="rgba(139,92,246,0.3)"
-          strokeWidth="2"
-          strokeDasharray="4,4"
-        />
+        {[...Array(10)].map((_, i) => {
+          const val = i + 1;
+          return (
+            <g key={i}>
+              <circle
+                cx={center.x + val * scale}
+                cy={center.y}
+                r="2"
+                fill="#64748b"
+              />
+              <circle
+                cx={center.x - val * scale}
+                cy={center.y}
+                r="2"
+                fill="#64748b"
+              />
+              <circle
+                cx={center.x}
+                cy={center.y + val * scale}
+                r="2"
+                fill="#64748b"
+              />
+              <circle
+                cx={center.x}
+                cy={center.y - val * scale}
+                r="2"
+                fill="#64748b"
+              />
+            </g>
+          );
+        })}
       </svg>
     );
   };
 
-  // Componente de circuito
-  const CircuitCanvas = () => {
-    return (
-      <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-xl p-8 min-h-[500px] relative border-2 border-cyan-500/30">
-        {/* Fuente de voltaje */}
-        <div className="absolute left-8 top-1/2 transform -translate-y-1/2">
-          <div className="relative">
-            <div className="w-16 h-16 rounded-full border-4 border-red-500 bg-red-500/20 flex items-center justify-center">
-              <span className="text-red-400 font-bold text-xl">~</span>
-            </div>
-            <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 text-red-400 font-semibold whitespace-nowrap">
-              {voltage}V
-            </div>
-          </div>
-        </div>
-
-        {/* Cables */}
-        <svg
-          className="absolute inset-0 pointer-events-none"
-          style={{ width: "100%", height: "100%" }}
-        >
-          {/* Cable superior */}
-          <line
-            x1="90"
-            y1="250"
-            x2="700"
-            y2="250"
-            stroke="#fbbf24"
-            strokeWidth="4"
-          />
-          {/* Cable inferior */}
-          <line
-            x1="90"
-            y1="250"
-            x2="700"
-            y2="250"
-            stroke="#fbbf24"
-            strokeWidth="4"
-            transform="translate(0, 100)"
-          />
-          {/* Cables verticales de componentes */}
-          {components.map((comp, idx) => (
-            <g key={comp.id}>
-              <line
-                x1={comp.x}
-                y1="250"
-                x2={comp.x}
-                y2="290"
-                stroke="#fbbf24"
-                strokeWidth="3"
-              />
-              <line
-                x1={comp.x}
-                y1="310"
-                x2={comp.x}
-                y2="350"
-                stroke="#fbbf24"
-                strokeWidth="3"
-              />
-            </g>
-          ))}
-        </svg>
-
-        {/* Componentes */}
-        {components.map((comp, idx) => (
-          <div
-            key={comp.id}
-            className="absolute"
-            style={{ left: comp.x - 30, top: comp.y + 40 }}
-          >
-            <div className="relative group">
-              {comp.type === "resistor" && (
-                <div className="w-16 h-8 bg-yellow-600 border-2 border-yellow-400 rounded flex items-center justify-center relative">
-                  <div className="absolute inset-0 bg-gradient-to-r from-yellow-700 via-yellow-500 to-yellow-700 opacity-50 rounded"></div>
-                  <span className="text-yellow-100 font-bold text-xs z-10">
-                    R
-                  </span>
-                </div>
-              )}
-              {comp.type === "capacitor" && (
-                <div className="flex items-center gap-1">
-                  <div className="w-1 h-12 bg-blue-500"></div>
-                  <div className="w-1 h-12 bg-blue-500"></div>
-                  <span className="absolute left-6 text-blue-400 font-bold text-xs">
-                    C
-                  </span>
-                </div>
-              )}
-              {comp.type === "inductor" && (
-                <div className="relative w-16 h-8">
-                  <svg width="64" height="32" viewBox="0 0 64 32">
-                    <path
-                      d="M 0,16 Q 8,0 16,16 T 32,16 T 48,16 T 64,16"
-                      fill="none"
-                      stroke="#10b981"
-                      strokeWidth="3"
-                    />
-                  </svg>
-                  <span className="absolute -top-4 left-1/2 transform -translate-x-1/2 text-green-400 font-bold text-xs">
-                    L
-                  </span>
-                </div>
-              )}
-
-              <div className="absolute -bottom-12 left-1/2 transform -translate-x-1/2 bg-slate-800 p-1 rounded shadow-lg flex gap-1 items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                <input
-                  type="number"
-                  value={comp.value}
-                  onChange={(e) =>
-                    updateComponentValue(comp.id, e.target.value)
-                  }
-                  className="w-20 px-2 py-1 bg-slate-700 text-white text-xs rounded"
-                  step="0.001"
-                />
-                <span className="text-xs text-gray-300">
-                  {comp.type === "resistor"
-                    ? "Ω"
-                    : comp.type === "capacitor"
-                    ? "F"
-                    : "H"}
-                </span>
-                <button
-                  onClick={() => removeComponent(comp.id)}
-                  className="p-1 bg-red-500 hover:bg-red-600 rounded"
-                >
-                  <Trash2 className="w-3 h-3 text-white" />
-                </button>
-              </div>
-            </div>
-          </div>
-        ))}
-
-        {components.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <p className="text-gray-500 text-lg">
-              Agrega componentes para construir tu circuito
-            </p>
-          </div>
-        )}
-      </div>
-    );
+  // Renderizar orientaciones
+  const getOrientationText = (rotation) => {
+    switch (rotation) {
+      case 0:
+        return "→";
+      case 90:
+        return "↓";
+      case 180:
+        return "←";
+      case 270:
+        return "↑";
+      default:
+        return "→";
+    }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-950 via-purple-900 to-slate-900 p-8">
-      <div className="max-w-7xl mx-auto">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white p-8">
+      <div className="max-w-[1400px] mx-auto">
         {/* Header */}
         <div className="text-center mb-8">
-          <div className="flex items-center justify-center gap-3 mb-4">
-            <Calculator className="w-12 h-12 text-purple-400" />
-            <h1 className="text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-400">
-              Números Complejos & Circuitos AC
-            </h1>
-          </div>
-          <p className="text-purple-300 text-lg">
-            Calculadora y simulador de circuitos con análisis fasorial
+          <h1 className="text-6xl font-bold bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 bg-clip-text text-transparent mb-4">
+            Calculadora de Números Complejos
+          </h1>
+          <p className="text-xl text-cyan-300">
+            Operaciones y Análisis de Circuitos AC - Método de Mallas
           </p>
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-4 mb-8 justify-center">
+        <div className="flex justify-center gap-4 mb-8">
           <button
             onClick={() => setActiveTab("calculator")}
-            className={`px-6 py-3 rounded-xl font-semibold transition-all flex items-center gap-2 ${
+            className={`flex items-center gap-2 px-8 py-4 rounded-xl font-bold text-lg transition-all ${
               activeTab === "calculator"
-                ? "bg-purple-500 text-white shadow-lg scale-105"
-                : "bg-slate-800/50 text-purple-200 hover:bg-slate-700/50"
+                ? "bg-gradient-to-r from-cyan-500 to-blue-600 shadow-lg shadow-cyan-500/50 scale-105"
+                : "bg-slate-800/50 hover:bg-slate-700/50"
             }`}
           >
-            <Calculator className="w-5 h-5" />
+            <Calculator size={24} />
             Calculadora
           </button>
           <button
-            onClick={() => setActiveTab("circuit")}
-            className={`px-6 py-3 rounded-xl font-semibold transition-all flex items-center gap-2 ${
-              activeTab === "circuit"
-                ? "bg-cyan-500 text-white shadow-lg scale-105"
-                : "bg-slate-800/50 text-cyan-200 hover:bg-slate-700/50"
+            onClick={() => setActiveTab("circuits")}
+            className={`flex items-center gap-2 px-8 py-4 rounded-xl font-bold text-lg transition-all ${
+              activeTab === "circuits"
+                ? "bg-gradient-to-r from-purple-500 to-pink-600 shadow-lg shadow-purple-500/50 scale-105"
+                : "bg-slate-800/50 hover:bg-slate-700/50"
             }`}
           >
-            <Zap className="w-5 h-5" />
-            Simulador de Circuitos
+            <Zap size={24} />
+            Circuitos AC
           </button>
         </div>
 
-        {/* Contenido de Calculadora */}
+        {/* Calculadora Tab */}
         {activeTab === "calculator" && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             <div className="space-y-6">
-              <div className="bg-gradient-to-br from-blue-900/40 to-blue-800/40 backdrop-blur-sm rounded-2xl p-6 border border-blue-500/30 shadow-xl">
-                <h3 className="text-2xl font-bold text-blue-300 mb-4 flex items-center gap-2">
-                  <span className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center text-white">
-                    1
-                  </span>
-                  Número z₁
-                </h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-blue-200 mb-2 font-semibold">
-                      Parte Real
-                    </label>
-                    <input
-                      type="number"
-                      value={z1Real}
-                      onChange={(e) =>
-                        setZ1Real(parseFloat(e.target.value) || 0)
-                      }
-                      className="w-full px-4 py-3 bg-slate-800/50 border border-blue-500/30 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      step="0.1"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-blue-200 mb-2 font-semibold">
-                      Parte Imaginaria
-                    </label>
-                    <input
-                      type="number"
-                      value={z1Imag}
-                      onChange={(e) =>
-                        setZ1Imag(parseFloat(e.target.value) || 0)
-                      }
-                      className="w-full px-4 py-3 bg-slate-800/50 border border-blue-500/30 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      step="0.1"
-                    />
-                  </div>
-                </div>
-                <div className="mt-4 p-3 bg-blue-950/50 rounded-lg">
-                  <p className="text-blue-200 font-mono text-lg">
-                    z₁ = {formatComplex({ real: z1Real, imag: z1Imag })}
-                  </p>
-                </div>
-              </div>
+              <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-6 border border-cyan-500/30 shadow-xl">
+                <h2 className="text-3xl font-bold text-cyan-300 mb-6 flex items-center gap-2">
+                  <Calculator className="w-8 h-8" />
+                  Números Complejos
+                </h2>
 
-              {operation !== "conjugate" && operation !== "power" && (
-                <div className="bg-gradient-to-br from-green-900/40 to-green-800/40 backdrop-blur-sm rounded-2xl p-6 border border-green-500/30 shadow-xl">
-                  <h3 className="text-2xl font-bold text-green-300 mb-4 flex items-center gap-2">
-                    <span className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center text-white">
-                      2
-                    </span>
-                    Número z₂
-                  </h3>
+                <div className="mb-6 p-4 bg-blue-900/30 rounded-xl border border-blue-500/30">
+                  <label className="block text-xl font-bold text-blue-300 mb-3">
+                    z₁ = a + bj
+                  </label>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-green-200 mb-2 font-semibold">
-                        Parte Real
+                      <label className="block text-sm text-blue-200 mb-2">
+                        Parte Real (a)
                       </label>
                       <input
                         type="number"
-                        value={z2Real}
-                        onChange={(e) =>
-                          setZ2Real(parseFloat(e.target.value) || 0)
-                        }
-                        className="w-full px-4 py-3 bg-slate-800/50 border border-green-500/30 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-green-500"
-                        step="0.1"
+                        value={z1Real}
+                        onChange={(e) => setZ1Real(parseFloat(e.target.value))}
+                        className="w-full px-4 py-3 bg-slate-900 border-2 border-blue-500 rounded-lg text-white font-mono text-lg focus:ring-2 focus:ring-blue-400"
                       />
                     </div>
                     <div>
-                      <label className="block text-green-200 mb-2 font-semibold">
-                        Parte Imaginaria
+                      <label className="block text-sm text-blue-200 mb-2">
+                        Parte Imaginaria (b)
                       </label>
                       <input
                         type="number"
-                        value={z2Imag}
-                        onChange={(e) =>
-                          setZ2Imag(parseFloat(e.target.value) || 0)
-                        }
-                        className="w-full px-4 py-3 bg-slate-800/50 border border-green-500/30 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-green-500"
-                        step="0.1"
+                        value={z1Imag}
+                        onChange={(e) => setZ1Imag(parseFloat(e.target.value))}
+                        className="w-full px-4 py-3 bg-slate-900 border-2 border-blue-500 rounded-lg text-white font-mono text-lg focus:ring-2 focus:ring-blue-400"
                       />
                     </div>
                   </div>
-                  <div className="mt-4 p-3 bg-green-950/50 rounded-lg">
-                    <p className="text-green-200 font-mono text-lg">
-                      z₂ = {formatComplex({ real: z2Real, imag: z2Imag })}
-                    </p>
+                </div>
+
+                {operation !== "conjugate" && (
+                  <div className="mb-6 p-4 bg-green-900/30 rounded-xl border border-green-500/30">
+                    <label className="block text-xl font-bold text-green-300 mb-3">
+                      z₂ = c + dj
+                    </label>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm text-green-200 mb-2">
+                          Parte Real (c)
+                        </label>
+                        <input
+                          type="number"
+                          value={z2Real}
+                          onChange={(e) =>
+                            setZ2Real(parseFloat(e.target.value))
+                          }
+                          className="w-full px-4 py-3 bg-slate-900 border-2 border-green-500 rounded-lg text-white font-mono text-lg focus:ring-2 focus:ring-green-400"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-green-200 mb-2">
+                          Parte Imaginaria (d)
+                        </label>
+                        <input
+                          type="number"
+                          value={z2Imag}
+                          onChange={(e) =>
+                            setZ2Imag(parseFloat(e.target.value))
+                          }
+                          className="w-full px-4 py-3 bg-slate-900 border-2 border-green-500 rounded-lg text-white font-mono text-lg focus:ring-2 focus:ring-green-400"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mb-6">
+                  <label className="block text-xl font-bold text-purple-300 mb-3">
+                    Operación
+                  </label>
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      { op: "add", icon: Plus, label: "Suma" },
+                      { op: "subtract", icon: Minus, label: "Resta" },
+                      { op: "multiply", icon: X, label: "Multiplicación" },
+                      { op: "divide", icon: Divide, label: "División" },
+                      { op: "conjugate", icon: RotateCcw, label: "Conjugado" },
+                      { op: "power", icon: Power, label: "Potencia²" },
+                    ].map(({ op, icon: Icon, label }) => (
+                      <button
+                        key={op}
+                        onClick={() => setOperation(op)}
+                        className={`p-4 rounded-xl font-bold transition-all flex flex-col items-center gap-2 ${
+                          operation === op
+                            ? "bg-gradient-to-br from-purple-600 to-pink-600 shadow-lg scale-105"
+                            : "bg-slate-700/50 hover:bg-slate-600/50"
+                        }`}
+                      >
+                        <Icon size={24} />
+                        <span className="text-xs">{label}</span>
+                      </button>
+                    ))}
                   </div>
                 </div>
-              )}
 
-              <div className="bg-gradient-to-br from-purple-900/40 to-purple-800/40 backdrop-blur-sm rounded-2xl p-6 border border-purple-500/30 shadow-xl">
-                <h3 className="text-2xl font-bold text-purple-300 mb-4">
-                  Operación
-                </h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    onClick={() => setOperation("add")}
-                    className={`p-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
-                      operation === "add"
-                        ? "bg-purple-500 text-white shadow-lg scale-105"
-                        : "bg-slate-800/50 text-purple-200 hover:bg-slate-700/50"
-                    }`}
-                  >
-                    <Plus className="w-5 h-5" /> Suma
-                  </button>
-                  <button
-                    onClick={() => setOperation("subtract")}
-                    className={`p-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
-                      operation === "subtract"
-                        ? "bg-purple-500 text-white shadow-lg scale-105"
-                        : "bg-slate-800/50 text-purple-200 hover:bg-slate-700/50"
-                    }`}
-                  >
-                    <Minus className="w-5 h-5" /> Resta
-                  </button>
-                  <button
-                    onClick={() => setOperation("multiply")}
-                    className={`p-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
-                      operation === "multiply"
-                        ? "bg-purple-500 text-white shadow-lg scale-105"
-                        : "bg-slate-800/50 text-purple-200 hover:bg-slate-700/50"
-                    }`}
-                  >
-                    <X className="w-5 h-5" /> Multiplicación
-                  </button>
-                  <button
-                    onClick={() => setOperation("divide")}
-                    className={`p-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
-                      operation === "divide"
-                        ? "bg-purple-500 text-white shadow-lg scale-105"
-                        : "bg-slate-800/50 text-purple-200 hover:bg-slate-700/50"
-                    }`}
-                  >
-                    <Divide className="w-5 h-5" /> División
-                  </button>
-                  <button
-                    onClick={() => setOperation("conjugate")}
-                    className={`p-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
-                      operation === "conjugate"
-                        ? "bg-purple-500 text-white shadow-lg scale-105"
-                        : "bg-slate-800/50 text-purple-200 hover:bg-slate-700/50"
-                    }`}
-                  >
-                    <RotateCcw className="w-5 h-5" /> Conjugado
-                  </button>
-                  <button
-                    onClick={() => setOperation("power")}
-                    className={`p-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
-                      operation === "power"
-                        ? "bg-purple-500 text-white shadow-lg scale-105"
-                        : "bg-slate-800/50 text-purple-200 hover:bg-slate-700/50"
-                    }`}
-                  >
-                    <Power className="w-5 h-5" /> Potencia²
-                  </button>
-                </div>
+                <button
+                  onClick={() => setShowPolar(!showPolar)}
+                  className="w-full py-3 bg-gradient-to-r from-amber-600 to-orange-600 rounded-xl font-bold hover:from-amber-500 hover:to-orange-500 transition-all"
+                >
+                  {showPolar ? "Mostrar Rectangular" : "Mostrar Polar"}
+                </button>
               </div>
 
-              <div className="bg-gradient-to-br from-orange-900/40 to-orange-800/40 backdrop-blur-sm rounded-2xl p-6 border border-orange-500/30 shadow-xl">
-                <h3 className="text-2xl font-bold text-orange-300 mb-4">
-                  Resultado
-                </h3>
-                <div className="space-y-3">
-                  <div className="p-4 bg-orange-950/50 rounded-lg">
-                    <p className="text-orange-200 font-mono text-xl font-bold">
-                      {result ? formatComplex(result) : "---"}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setShowPolar(!showPolar)}
-                    className="w-full p-3 bg-orange-600 hover:bg-orange-700 text-white rounded-lg font-semibold transition-all"
-                  >
-                    {showPolar ? "Forma Rectangular" : "Forma Polar"}
-                  </button>
-                  {showPolar && result && (
-                    <div className="p-4 bg-orange-950/50 rounded-lg">
-                      <p className="text-orange-200 font-mono text-lg">
+              {result && (
+                <div className="bg-gradient-to-br from-amber-900/40 to-orange-800/40 backdrop-blur-sm rounded-2xl p-6 border border-amber-500/30 shadow-xl">
+                  <h3 className="text-2xl font-bold text-amber-300 mb-4">
+                    Resultado
+                  </h3>
+                  <div className="space-y-4">
+                    <div className="p-4 bg-slate-900/50 rounded-lg">
+                      <p className="text-sm text-amber-200 mb-2">
+                        Forma Rectangular:
+                      </p>
+                      <p className="text-amber-100 font-mono text-2xl font-bold">
+                        {formatComplex(result)}
+                      </p>
+                    </div>
+                    <div className="p-4 bg-slate-900/50 rounded-lg">
+                      <p className="text-sm text-amber-200 mb-2">Forma Polar:</p>
+                      <p className="text-amber-100 font-mono text-2xl font-bold">
                         {formatPolar(result)}
                       </p>
                     </div>
-                  )}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
-            <div className="flex items-center justify-center">
-              <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-4 border border-purple-500/30 shadow-2xl">
-                <h3 className="text-2xl font-bold text-purple-300 mb-4 text-center">
-                  Plano Complejo
-                </h3>
+            <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-6 border border-cyan-500/30 shadow-xl">
+              <h3 className="text-2xl font-bold text-cyan-300 mb-4 text-center">
+                Representación Gráfica
+              </h3>
+              <div className="flex justify-center">
                 <ComplexPlane />
-                <div className="mt-4 flex justify-center gap-6 text-sm">
+              </div>
+              <div className="mt-4 flex justify-center gap-6 text-sm">
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-1 bg-blue-500"></div>
+                  <span className="text-blue-300">z₁</span>
+                </div>
+                {operation !== "conjugate" && (
                   <div className="flex items-center gap-2">
-                    <div className="w-4 h-4 bg-blue-500 rounded-full"></div>
-                    <span className="text-blue-300">z₁</span>
+                    <div className="w-4 h-1 bg-green-500"></div>
+                    <span className="text-green-300">z₂</span>
                   </div>
-                  {operation !== "conjugate" && operation !== "power" && (
-                    <div className="flex items-center gap-2">
-                      <div className="w-4 h-4 bg-green-500 rounded-full"></div>
-                      <span className="text-green-300">z₂</span>
-                    </div>
-                  )}
-                  <div className="flex items-center gap-2">
-                    <div className="w-4 h-4 bg-orange-500 rounded-full"></div>
-                    <span className="text-orange-300">Resultado</span>
-                  </div>
+                )}
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-1 bg-amber-500"></div>
+                  <span className="text-amber-300">Resultado</span>
                 </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* Contenido de Circuitos */}
-        {activeTab === "circuit" && (
+        {/* Circuitos Tab */}
+        {activeTab === "circuits" && (
           <div className="space-y-6">
-            {/* Controles de configuración */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-gradient-to-br from-red-900/40 to-red-800/40 backdrop-blur-sm rounded-2xl p-6 border border-red-500/30 shadow-xl">
-                <h3 className="text-xl font-bold text-red-300 mb-3">
-                  Fuente de Voltaje
-                </h3>
-                <label className="block text-red-200 mb-2">Voltaje (V)</label>
-                <input
-                  type="number"
-                  value={voltage}
-                  onChange={(e) => setVoltage(parseFloat(e.target.value) || 0)}
-                  className="w-full px-4 py-2 bg-slate-800/50 border border-red-500/30 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-red-500"
-                  step="1"
-                />
+            {/* Instrucciones */}
+            <div className="bg-gradient-to-r from-cyan-900/40 to-blue-900/40 backdrop-blur-sm rounded-xl p-4 border border-cyan-500/30">
+              <p className="text-cyan-200 text-center font-bold">
+                💡 <span className="text-white">Arrastra componentes</span> para moverlos • 
+                <span className="text-white"> Click en "Conectar Nodos"</span> → Click en nodos azules para conectar • 
+                <span className="text-white"> Botón ↻</span> rota componentes
+              </p>
+            </div>
+
+            {/* Menú de componentes */}
+            <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-6 border border-purple-500/30 shadow-xl">
+              <h2 className="text-2xl font-bold text-purple-300 mb-4 flex items-center gap-2">
+                <Grid3x3 className="w-6 h-6" />
+                Componentes del Circuito
+              </h2>
+
+              <div className="grid grid-cols-2 md:grid-cols-7 gap-3 mb-6">
+                <button
+                  onClick={() => addComponentToGrid("resistor")}
+                  className="p-4 bg-red-600/20 hover:bg-red-600/40 border-2 border-red-500 rounded-xl transition-all flex flex-col items-center gap-2"
+                >
+                  <div className="w-12 h-6 border-2 border-red-500"></div>
+                  <span className="text-red-300 font-bold text-xs text-center">
+                    RESISTENCIA<br/>(R)
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => addComponentToGrid("capacitor")}
+                  className="p-4 bg-blue-600/20 hover:bg-blue-600/40 border-2 border-blue-500 rounded-xl transition-all flex flex-col items-center gap-2"
+                >
+                  <div className="flex gap-1">
+                    <div className="w-1 h-6 bg-blue-500"></div>
+                    <div className="w-1 h-6 bg-blue-500"></div>
+                  </div>
+                  <span className="text-blue-300 font-bold text-xs text-center">
+                    CAPACITOR<br/>(C)
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => addComponentToGrid("inductor")}
+                  className="p-4 bg-green-600/20 hover:bg-green-600/40 border-2 border-green-500 rounded-xl transition-all flex flex-col items-center gap-2"
+                >
+                  <svg width="40" height="20" className="stroke-green-500">
+                    <path
+                      d="M0,10 Q5,0 10,10 T20,10 T30,10 T40,10"
+                      fill="none"
+                      strokeWidth="2"
+                    />
+                  </svg>
+                  <span className="text-green-300 font-bold text-xs text-center">
+                    INDUCTOR<br/>(L)
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => addComponentToGrid("voltage_source")}
+                  className="p-4 bg-purple-600/20 hover:bg-purple-600/40 border-2 border-purple-500 rounded-xl transition-all flex flex-col items-center gap-2"
+                >
+                  <div className="relative w-8 h-8 rounded-full border-2 border-purple-500 flex items-center justify-center text-purple-300 font-bold">
+                    <span className="text-xs absolute -top-1">+</span>
+                    <span className="text-2xl">─</span>
+                    <span className="text-xs absolute -bottom-1">─</span>
+                  </div>
+                  <span className="text-purple-300 font-bold text-xs text-center">
+                    VOLTAJE DC<br/>(VDC)
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => addComponentToGrid("ac_source")}
+                  className="p-4 bg-amber-600/20 hover:bg-amber-600/40 border-2 border-amber-500 rounded-xl transition-all flex flex-col items-center gap-2"
+                >
+                  <div className="w-8 h-8 rounded-full border-2 border-amber-500 flex items-center justify-center text-amber-300 font-bold text-xl">
+                    ~
+                  </div>
+                  <span className="text-amber-300 font-bold text-xs text-center">
+                    VOLTAJE AC<br/>(VAC)
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => addComponentToGrid("current_source_dc")}
+                  className="p-4 bg-teal-600/20 hover:bg-teal-600/40 border-2 border-teal-500 rounded-xl transition-all flex flex-col items-center gap-2"
+                >
+                  <div className="w-8 h-8 rounded-full border-2 border-teal-500 flex items-center justify-center">
+                    <svg width="16" height="16" viewBox="0 0 16 16">
+                      <line x1="8" y1="2" x2="8" y2="14" stroke="#14b8a6" strokeWidth="2"/>
+                      <polygon points="8,2 6,5 10,5" fill="#14b8a6"/>
+                    </svg>
+                  </div>
+                  <span className="text-teal-300 font-bold text-xs text-center">
+                    CORRIENTE DC<br/>(IDC)
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => addComponentToGrid("current_source")}
+                  className="p-4 bg-pink-600/20 hover:bg-pink-600/40 border-2 border-pink-500 rounded-xl transition-all flex flex-col items-center gap-2"
+                >
+                  <div className="w-8 h-8 rounded-full border-2 border-pink-500 flex items-center justify-center">
+                    <svg width="16" height="16" viewBox="0 0 16 16">
+                      <line x1="8" y1="2" x2="8" y2="14" stroke="#ec4899" strokeWidth="2"/>
+                      <polygon points="8,2 6,5 10,5" fill="#ec4899"/>
+                    </svg>
+                  </div>
+                  <span className="text-pink-300 font-bold text-xs text-center">
+                    CORRIENTE AC<br/>(IAC)
+                  </span>
+                </button>
               </div>
 
-              <div className="bg-gradient-to-br from-purple-900/40 to-purple-800/40 backdrop-blur-sm rounded-2xl p-6 border border-purple-500/30 shadow-xl">
-                <h3 className="text-xl font-bold text-purple-300 mb-3">
-                  Frecuencia
-                </h3>
-                <label className="block text-purple-200 mb-2">
-                  Frecuencia (Hz)
-                </label>
-                <input
-                  type="number"
-                  value={frequency}
-                  onChange={(e) =>
-                    setFrequency(parseFloat(e.target.value) || 0)
-                  }
-                  className="w-full px-4 py-2 bg-slate-800/50 border border-purple-500/30 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  step="1"
-                />
-              </div>
-
-              <div className="bg-gradient-to-br from-cyan-900/40 to-cyan-800/40 backdrop-blur-sm rounded-2xl p-6 border border-cyan-500/30 shadow-xl">
-                <h3 className="text-xl font-bold text-cyan-300 mb-3">
-                  Agregar Componentes
-                </h3>
-                <div className="flex gap-2">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div>
+                  <label className="block text-sm text-cyan-200 mb-2">
+                    Frecuencia (Hz)
+                  </label>
+                  <input
+                    type="number"
+                    value={frequency}
+                    onChange={(e) => setFrequency(parseFloat(e.target.value))}
+                    className="w-full px-4 py-2 bg-slate-900 border-2 border-cyan-500 rounded-lg text-white"
+                  />
+                </div>
+                <div className="flex items-end">
                   <button
-                    onClick={() => addComponent("resistor")}
-                    className="flex-1 p-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-semibold transition-all text-sm"
+                    onClick={() => {
+                      setConnectingMode(!connectingMode);
+                      setFirstNode(null);
+                    }}
+                    className={`w-full flex items-center justify-center gap-2 px-6 py-2 rounded-xl font-bold transition-all ${
+                      connectingMode
+                        ? "bg-cyan-600 hover:bg-cyan-500 ring-4 ring-cyan-300 animate-pulse"
+                        : "bg-cyan-600/50 hover:bg-cyan-600"
+                    }`}
                   >
-                    Resistor
+                    <Link size={20} />
+                    {connectingMode ? "✓ Modo Conexión" : "Conectar Nodos"}
+                  </button>
+                </div>
+                <div className="flex items-end gap-2">
+                  <button
+                    onClick={solveCircuitByMesh}
+                    className="flex-1 flex items-center justify-center gap-2 px-6 py-2 bg-gradient-to-r from-green-600 to-emerald-600 rounded-xl font-bold hover:from-green-500 hover:to-emerald-500 transition-all"
+                  >
+                    <Play size={20} />
+                    Resolver
                   </button>
                   <button
-                    onClick={() => addComponent("capacitor")}
-                    className="flex-1 p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition-all text-sm"
+                    onClick={() => {
+                      setComponents([]);
+                      setWires([]);
+                      setCircuitResult(null);
+                      setMeshEquations([]);
+                      setFirstNode(null);
+                      setConnectingMode(false);
+                    }}
+                    className="px-4 py-2 bg-red-600/20 border-2 border-red-500 rounded-xl font-bold hover:bg-red-600/40 transition-all"
                   >
-                    Capacitor
-                  </button>
-                  <button
-                    onClick={() => addComponent("inductor")}
-                    className="flex-1 p-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-all text-sm"
-                  >
-                    Inductor
+                    <Trash2 size={20} />
                   </button>
                 </div>
               </div>
             </div>
 
             {/* Canvas del circuito */}
-            <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-4 border border-cyan-500/30 shadow-2xl">
+            <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-6 border border-cyan-500/30 shadow-xl">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-2xl font-bold text-cyan-300">
-                  Circuito en Serie
+                  Editor de Circuitos
                 </h3>
-                <div className="flex gap-2">
-                  <button
-                    onClick={solveCircuit}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-all flex items-center gap-2"
-                  >
-                    <Play className="w-5 h-5" />
-                    Analizar
-                  </button>
-                  <button
-                    onClick={() => {
-                      setComponents([]);
-                      setCircuitResult(null);
-                    }}
-                    className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold transition-all flex items-center gap-2"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                    Limpiar
-                  </button>
-                </div>
+                {connectingMode && (
+                  <div className="bg-cyan-500 text-white px-4 py-2 rounded-lg font-bold animate-pulse">
+                    {firstNode
+                      ? "🎯 Haz clic en el segundo nodo"
+                      : "🎯 Haz clic en el primer nodo"}
+                  </div>
+                )}
               </div>
-              <CircuitCanvas />
-            </div>
 
-            {/* Resultados del análisis */}
-            {circuitResult && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-gradient-to-br from-orange-900/40 to-orange-800/40 backdrop-blur-sm rounded-2xl p-6 border border-orange-500/30 shadow-xl">
-                  <h3 className="text-2xl font-bold text-orange-300 mb-4">
-                    Impedancia Total (Z)
-                  </h3>
-                  <div className="space-y-3">
-                    <div className="p-4 bg-orange-950/50 rounded-lg">
-                      <p className="text-sm text-orange-200 mb-1">
-                        Forma Rectangular:
-                      </p>
-                      <p className="text-orange-200 font-mono text-xl font-bold">
-                        {formatComplex(circuitResult.impedance)} Ω
-                      </p>
-                    </div>
-                    <div className="p-4 bg-orange-950/50 rounded-lg">
-                      <p className="text-sm text-orange-200 mb-1">
-                        Forma Polar:
-                      </p>
-                      <p className="text-orange-200 font-mono text-xl font-bold">
-                        {formatPolar(circuitResult.impedance)} Ω
-                      </p>
-                    </div>
-                    <div className="p-4 bg-orange-950/50 rounded-lg">
-                      <p className="text-sm text-orange-200 mb-1">Magnitud:</p>
-                      <p className="text-orange-200 font-mono text-xl font-bold">
-                        {circuitResult.impedanceMag.toFixed(2)} Ω
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-gradient-to-br from-blue-900/40 to-blue-800/40 backdrop-blur-sm rounded-2xl p-6 border border-blue-500/30 shadow-xl">
-                  <h3 className="text-2xl font-bold text-blue-300 mb-4">
-                    Corriente (I)
-                  </h3>
-                  <div className="space-y-3">
-                    <div className="p-4 bg-blue-950/50 rounded-lg">
-                      <p className="text-sm text-blue-200 mb-1">
-                        Forma Rectangular:
-                      </p>
-                      <p className="text-blue-200 font-mono text-xl font-bold">
-                        {formatComplex(circuitResult.current)} A
-                      </p>
-                    </div>
-                    <div className="p-4 bg-blue-950/50 rounded-lg">
-                      <p className="text-sm text-blue-200 mb-1">Forma Polar:</p>
-                      <p className="text-blue-200 font-mono text-xl font-bold">
-                        {formatPolar(circuitResult.current)} A
-                      </p>
-                    </div>
-                    <div className="p-4 bg-blue-950/50 rounded-lg">
-                      <p className="text-sm text-blue-200 mb-1">Magnitud:</p>
-                      <p className="text-blue-200 font-mono text-xl font-bold">
-                        {circuitResult.currentMag.toFixed(4)} A
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-gradient-to-br from-purple-900/40 to-purple-800/40 backdrop-blur-sm rounded-2xl p-6 border border-purple-500/30 shadow-xl">
-                  <h3 className="text-2xl font-bold text-purple-300 mb-4">
-                    Ángulo de Fase
-                  </h3>
-                  <div className="p-4 bg-purple-950/50 rounded-lg">
-                    <p className="text-purple-200 font-mono text-3xl font-bold text-center">
-                      {circuitResult.phase.toFixed(2)}°
-                    </p>
-                    <p className="text-purple-300 text-sm text-center mt-2">
-                      {circuitResult.phase > 0
-                        ? "Inductivo (corriente retrasada)"
-                        : circuitResult.phase < 0
-                        ? "Capacitivo (corriente adelantada)"
-                        : "Resistivo puro"}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="bg-gradient-to-br from-green-900/40 to-green-800/40 backdrop-blur-sm rounded-2xl p-6 border border-green-500/30 shadow-xl">
-                  <h3 className="text-2xl font-bold text-green-300 mb-4">
-                    Factor de Potencia
-                  </h3>
-                  <div className="p-4 bg-green-950/50 rounded-lg">
-                    <p className="text-green-200 font-mono text-3xl font-bold text-center">
-                      {circuitResult.powerFactor.toFixed(4)}
-                    </p>
-                    <p className="text-green-300 text-sm text-center mt-2">
-                      cos(φ) ={" "}
-                      {circuitResult.powerFactor > 0.95
-                        ? "Excelente"
-                        : circuitResult.powerFactor > 0.85
-                        ? "Bueno"
-                        : circuitResult.powerFactor > 0.7
-                        ? "Aceptable"
-                        : "Necesita corrección"}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Diagrama fasorial */}
-            {circuitResult && (
-              <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-4 border border-cyan-500/30 shadow-2xl">
-                <h3 className="text-2xl font-bold text-cyan-300 mb-4 text-center">
-                  Diagrama Fasorial
-                </h3>
-                <div className="flex justify-center">
-                  <svg
-                    width="500"
-                    height="500"
-                    className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-xl"
-                  >
-                    <defs>
-                      <pattern
-                        id="gridCircuit"
-                        width="40"
-                        height="40"
-                        patternUnits="userSpaceOnUse"
-                      >
-                        <path
-                          d="M 40 0 L 0 0 0 40"
-                          fill="none"
-                          stroke="rgba(100,116,139,0.3)"
-                          strokeWidth="0.5"
-                        />
-                      </pattern>
-                      <marker
-                        id="arrowVoltage"
-                        markerWidth="10"
-                        markerHeight="10"
-                        refX="9"
-                        refY="3"
-                        orient="auto"
-                      >
-                        <path d="M0,0 L0,6 L9,3 z" fill="#ef4444" />
-                      </marker>
-                      <marker
-                        id="arrowCurrent"
-                        markerWidth="10"
-                        markerHeight="10"
-                        refX="9"
-                        refY="3"
-                        orient="auto"
-                      >
-                        <path d="M0,0 L0,6 L9,3 z" fill="#3b82f6" />
-                      </marker>
-                    </defs>
-
-                    <rect width="500" height="500" fill="url(#gridCircuit)" />
-
-                    {/* Ejes */}
-                    <line
-                      x1="0"
-                      y1="250"
-                      x2="500"
-                      y2="250"
-                      stroke="rgba(148,163,184,0.5)"
-                      strokeWidth="2"
-                    />
-                    <line
-                      x1="250"
-                      y1="0"
-                      x2="250"
-                      y2="500"
-                      stroke="rgba(148,163,184,0.5)"
-                      strokeWidth="2"
-                    />
-
-                    {/* Fasor de voltaje (referencia horizontal) */}
-                    <line
-                      x1="250"
-                      y1="250"
-                      x2="450"
-                      y2="250"
-                      stroke="#ef4444"
-                      strokeWidth="4"
-                      markerEnd="url(#arrowVoltage)"
-                    />
-                    <text
-                      x="460"
-                      y="250"
-                      fill="#ef4444"
-                      fontSize="16"
-                      fontWeight="bold"
+              <div 
+                className="relative"
+                style={{ userSelect: 'none' }}
+              >
+                <svg
+                  width="1000"
+                  height="700"
+                  className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-xl border-2 border-cyan-500/30"
+                  style={{ cursor: draggingId ? 'grabbing' : (connectingMode ? 'crosshair' : 'default') }}
+                  onMouseMove={handleCanvasMouseMove}
+                  onMouseUp={handleCanvasMouseUp}
+                  onMouseLeave={handleCanvasMouseUp}
+                >
+                  <defs>
+                    <pattern
+                      id="circuitGrid"
+                      width={gridSize}
+                      height={gridSize}
+                      patternUnits="userSpaceOnUse"
                     >
-                      V
-                    </text>
+                      <circle
+                        cx={gridSize / 2}
+                        cy={gridSize / 2}
+                        r="1.5"
+                        fill="#334155"
+                      />
+                      <path
+                        d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`}
+                        fill="none"
+                        stroke="rgba(51,65,85,0.3)"
+                        strokeWidth="0.5"
+                      />
+                    </pattern>
+                  </defs>
+                  <rect width="1000" height="700" fill="url(#circuitGrid)" />
 
-                    {/* Fasor de corriente */}
-                    {(() => {
-                      const angle = (-circuitResult.phase * Math.PI) / 180;
-                      const length = 150;
-                      const x2 = 250 + length * Math.cos(angle);
-                      const y2 = 250 - length * Math.sin(angle);
-                      return (
-                        <>
-                          <line
-                            x1="250"
-                            y1="250"
-                            x2={x2}
-                            y2={y2}
-                            stroke="#3b82f6"
-                            strokeWidth="4"
-                            markerEnd="url(#arrowCurrent)"
-                          />
-                          <text
-                            x={x2 + 10}
-                            y={y2}
-                            fill="#3b82f6"
-                            fontSize="16"
-                            fontWeight="bold"
-                          >
-                            I
-                          </text>
+                  {/* Dibujar cables */}
+                  {wires.map((wire) => {
+                    const fromComp = components.find((c) => c.id === wire.fromComp);
+                    const toComp = components.find((c) => c.id === wire.toComp);
 
-                          {/* Arco del ángulo */}
-                          {circuitResult.phase !== 0 && (
+                    if (!fromComp || !toComp) return null;
+
+                    const fromPos = getNodePosition(fromComp, wire.fromNode);
+                    const toPos = getNodePosition(toComp, wire.toNode);
+
+                    return (
+                      <line
+                        key={wire.id}
+                        x1={fromPos.x}
+                        y1={fromPos.y}
+                        x2={toPos.x}
+                        y2={toPos.y}
+                        stroke="#3b82f6"
+                        strokeWidth="3"
+                      />
+                    );
+                  })}
+
+                  {/* Dibujar componentes */}
+                  {components.map((comp) => {
+                    const node1Pos = getNodePosition(comp, 1);
+                    const node2Pos = getNodePosition(comp, 2);
+
+                    return (
+                      <g key={comp.id}>
+                        {/* Componente - DRAGGABLE */}
+                        <g
+                          transform={`translate(${comp.x}, ${comp.y}) rotate(${comp.rotation})`}
+                          onMouseDown={(e) => handleComponentMouseDown(e, comp)}
+                          style={{ 
+                            cursor: connectingMode ? 'crosshair' : (draggingId === comp.id ? 'grabbing' : 'grab'),
+                            pointerEvents: 'all'
+                          }}
+                        >
+                          {comp.type === "resistor" && (
                             <>
-                              <path
-                                d={`M ${250 + 50} 250 A 50 50 0 0 ${
-                                  circuitResult.phase > 0 ? 1 : 0
-                                } ${250 + 50 * Math.cos(angle)} ${
-                                  250 - 50 * Math.sin(angle)
-                                }`}
+                              <rect
+                                x="-25"
+                                y="-8"
+                                width="50"
+                                height="16"
                                 fill="none"
-                                stroke="#a855f7"
+                                stroke="#ef4444"
+                                strokeWidth="3"
+                              />
+                              <line
+                                x1="-35"
+                                y1="0"
+                                x2="-25"
+                                y2="0"
+                                stroke="#ef4444"
                                 strokeWidth="2"
-                                strokeDasharray="3,3"
+                              />
+                              <line
+                                x1="25"
+                                y1="0"
+                                x2="35"
+                                y2="0"
+                                stroke="#ef4444"
+                                strokeWidth="2"
                               />
                               <text
-                                x="310"
-                                y={circuitResult.phase > 0 ? "235" : "265"}
-                                fill="#a855f7"
-                                fontSize="14"
+                                y="30"
+                                textAnchor="middle"
+                                fill="#ef4444"
+                                fontSize="12"
+                                fontWeight="bold"
+                                style={{ pointerEvents: 'none' }}
                               >
-                                {Math.abs(circuitResult.phase).toFixed(1)}°
+                                {comp.value}Ω
                               </text>
                             </>
                           )}
-                        </>
-                      );
-                    })()}
+                          {comp.type === "capacitor" && (
+                            <>
+                              <line
+                                x1="-35"
+                                y1="0"
+                                x2="-5"
+                                y2="0"
+                                stroke="#3b82f6"
+                                strokeWidth="2"
+                              />
+                              <line
+                                x1="-5"
+                                y1="-15"
+                                x2="-5"
+                                y2="15"
+                                stroke="#3b82f6"
+                                strokeWidth="3"
+                              />
+                              <line
+                                x1="5"
+                                y1="-15"
+                                x2="5"
+                                y2="15"
+                                stroke="#3b82f6"
+                                strokeWidth="3"
+                              />
+                              <line
+                                x1="5"
+                                y1="0"
+                                x2="35"
+                                y2="0"
+                                stroke="#3b82f6"
+                                strokeWidth="2"
+                              />
+                              <text
+                                y="30"
+                                textAnchor="middle"
+                                fill="#3b82f6"
+                                fontSize="12"
+                                fontWeight="bold"
+                                style={{ pointerEvents: 'none' }}
+                              >
+                                {comp.value}j
+                              </text>
+                            </>
+                          )}
+                          {comp.type === "inductor" && (
+                            <>
+                              <line
+                                x1="-35"
+                                y1="0"
+                                x2="-20"
+                                y2="0"
+                                stroke="#10b981"
+                                strokeWidth="2"
+                              />
+                              {[0, 1, 2, 3].map((i) => (
+                                <circle
+                                  key={i}
+                                  cx={-20 + i * 10}
+                                  cy="-5"
+                                  r="5"
+                                  fill="none"
+                                  stroke="#10b981"
+                                  strokeWidth="2"
+                                />
+                              ))}
+                              <line
+                                x1="20"
+                                y1="0"
+                                x2="35"
+                                y2="0"
+                                stroke="#10b981"
+                                strokeWidth="2"
+                              />
+                              <text
+                                y="30"
+                                textAnchor="middle"
+                                fill="#10b981"
+                                fontSize="12"
+                                fontWeight="bold"
+                                style={{ pointerEvents: 'none' }}
+                              >
+                                {comp.value}j
+                              </text>
+                            </>
+                          )}
+                          {(comp.type === "voltage_source" ||
+                            comp.type === "ac_source") && (
+                            <>
+                              <circle
+                                cx="0"
+                                cy="0"
+                                r="18"
+                                fill="none"
+                                stroke={
+                                  comp.type === "voltage_source"
+                                    ? "#a855f7"
+                                    : "#f59e0b"
+                                }
+                                strokeWidth="3"
+                              />
+                              {comp.type === "voltage_source" ? (
+                                <>
+                                  {/* Símbolo DC estándar: líneas paralelas */}
+                                  <line
+                                    x1="-8"
+                                    y1="-5"
+                                    x2="-8"
+                                    y2="5"
+                                    stroke="#a855f7"
+                                    strokeWidth="3"
+                                  />
+                                  <line
+                                    x1="8"
+                                    y1="-2"
+                                    x2="8"
+                                    y2="2"
+                                    stroke="#a855f7"
+                                    strokeWidth="3"
+                                  />
+                                  {/* Símbolo + */}
+                                  <text
+                                    x="-13"
+                                    y="3"
+                                    fill="#a855f7"
+                                    fontSize="10"
+                                    fontWeight="bold"
+                                  >
+                                    +
+                                  </text>
+                                  {/* Símbolo - */}
+                                  <text
+                                    x="10"
+                                    y="3"
+                                    fill="#a855f7"
+                                    fontSize="10"
+                                    fontWeight="bold"
+                                  >
+                                    −
+                                  </text>
+                                </>
+                              ) : (
+                                <>
+                                  {/* Símbolo AC estándar: onda sinusoidal clara */}
+                                  <path
+                                    d="M -12 0 Q -9 -8 -6 0 T 0 0 Q 3 8 6 0 T 12 0"
+                                    fill="none"
+                                    stroke="#f59e0b"
+                                    strokeWidth="2.5"
+                                  />
+                                  <text
+                                    x="-4"
+                                    y="-13"
+                                    fill="#f59e0b"
+                                    fontSize="9"
+                                    fontWeight="bold"
+                                  >
+                                    AC
+                                  </text>
+                                </>
+                              )}
+                              <line
+                                x1="-35"
+                                y1="0"
+                                x2="-18"
+                                y2="0"
+                                stroke={
+                                  comp.type === "voltage_source"
+                                    ? "#a855f7"
+                                    : "#f59e0b"
+                                }
+                                strokeWidth="2"
+                              />
+                              <line
+                                x1="18"
+                                y1="0"
+                                x2="35"
+                                y2="0"
+                                stroke={
+                                  comp.type === "voltage_source"
+                                    ? "#a855f7"
+                                    : "#f59e0b"
+                                }
+                                strokeWidth="2"
+                              />
+                              <text
+                                y="35"
+                                textAnchor="middle"
+                                fill={
+                                  comp.type === "voltage_source"
+                                    ? "#a855f7"
+                                    : "#f59e0b"
+                                }
+                                fontSize="12"
+                                fontWeight="bold"
+                                style={{ pointerEvents: 'none' }}
+                              >
+                                {comp.type === "voltage_source" 
+                                  ? `${comp.value}V DC`
+                                  : `${comp.value}∠${comp.phase || 0}° V`
+                                }
+                              </text>
+                            </>
+                          )}
+                          {(comp.type === "current_source" || comp.type === "current_source_dc") && (
+                            <>
+                              <circle
+                                cx="0"
+                                cy="0"
+                                r="18"
+                                fill="none"
+                                stroke={comp.type === "current_source_dc" ? "#14b8a6" : "#ec4899"}
+                                strokeWidth="3"
+                              />
+                              <defs>
+                                <marker
+                                  id={`arrow-${comp.id}`}
+                                  markerWidth="10"
+                                  markerHeight="10"
+                                  refX="5"
+                                  refY="3"
+                                  orient="auto"
+                                >
+                                  <path d="M0,0 L0,6 L9,3 z" fill={comp.type === "current_source_dc" ? "#14b8a6" : "#ec4899"} />
+                                </marker>
+                              </defs>
+                              <line
+                                x1="0"
+                                y1="-10"
+                                x2="0"
+                                y2="10"
+                                stroke={comp.type === "current_source_dc" ? "#14b8a6" : "#ec4899"}
+                                strokeWidth="2"
+                                markerEnd={`url(#arrow-${comp.id})`}
+                              />
+                              {comp.type === "current_source_dc" && (
+                                <text
+                                  x="-4"
+                                  y="-13"
+                                  fill="#14b8a6"
+                                  fontSize="9"
+                                  fontWeight="bold"
+                                >
+                                  DC
+                                </text>
+                              )}
+                              {comp.type === "current_source" && (
+                                <text
+                                  x="-4"
+                                  y="-13"
+                                  fill="#ec4899"
+                                  fontSize="9"
+                                  fontWeight="bold"
+                                >
+                                  AC
+                                </text>
+                              )}
+                              <line
+                                x1="-35"
+                                y1="0"
+                                x2="-18"
+                                y2="0"
+                                stroke={comp.type === "current_source_dc" ? "#14b8a6" : "#ec4899"}
+                                strokeWidth="2"
+                              />
+                              <line
+                                x1="18"
+                                y1="0"
+                                x2="35"
+                                y2="0"
+                                stroke={comp.type === "current_source_dc" ? "#14b8a6" : "#ec4899"}
+                                strokeWidth="2"
+                              />
+                              <text
+                                y="35"
+                                textAnchor="middle"
+                                fill={comp.type === "current_source_dc" ? "#14b8a6" : "#ec4899"}
+                                fontSize="12"
+                                fontWeight="bold"
+                                style={{ pointerEvents: 'none' }}
+                              >
+                                {comp.type === "current_source_dc" 
+                                  ? `${comp.value}A DC`
+                                  : `${comp.value}∠${comp.phase || 0}° A`
+                                }
+                              </text>
+                            </>
+                          )}
+                        </g>
 
-                    <circle
-                      cx="250"
-                      cy="250"
-                      r="40"
-                      fill="none"
-                      stroke="rgba(139,92,246,0.3)"
-                      strokeWidth="2"
-                    />
-
-                    <text
-                      x="480"
-                      y="260"
-                      fill="#94a3b8"
-                      fontSize="14"
-                      fontWeight="bold"
-                    >
-                      Re
-                    </text>
-                    <text
-                      x="260"
-                      y="20"
-                      fill="#94a3b8"
-                      fontSize="14"
-                      fontWeight="bold"
-                    >
-                      Im
-                    </text>
-                  </svg>
-                </div>
-                <div className="mt-4 flex justify-center gap-6 text-sm">
-                  <div className="flex items-center gap-2">
-                    <div className="w-4 h-1 bg-red-500"></div>
-                    <span className="text-red-300">Voltaje (referencia)</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-4 h-1 bg-blue-500"></div>
-                    <span className="text-blue-300">Corriente</span>
-                  </div>
-                </div>
+                        {/* Nodos de conexión - CLICKABLES */}
+                        <circle
+                          cx={node1Pos.x}
+                          cy={node1Pos.y}
+                          r="7"
+                          fill={
+                            firstNode?.compId === comp.id && firstNode?.nodeNum === 1
+                              ? "#22d3ee"
+                              : "#0ea5e9"
+                          }
+                          stroke="#fff"
+                          strokeWidth="2"
+                          style={{ cursor: "pointer", pointerEvents: 'all' }}
+                          onClick={(e) => handleNodeClick(e, comp, 1)}
+                        />
+                        <circle
+                          cx={node2Pos.x}
+                          cy={node2Pos.y}
+                          r="7"
+                          fill={
+                            firstNode?.compId === comp.id && firstNode?.nodeNum === 2
+                              ? "#22d3ee"
+                              : "#0ea5e9"
+                          }
+                          stroke="#fff"
+                          strokeWidth="2"
+                          style={{ cursor: "pointer", pointerEvents: 'all' }}
+                          onClick={(e) => handleNodeClick(e, comp, 2)}
+                        />
+                      </g>
+                    );
+                  })}
+                </svg>
               </div>
+
+              {/* Lista de componentes - SIEMPRE VISIBLE */}
+              <div className="mt-4 space-y-2 bg-cyan-900/20 p-4 rounded-xl border-2 border-cyan-500">
+                <h4 className="font-bold text-cyan-300 text-xl">
+                  ⚙️ Componentes en el circuito ({components.length}):
+                </h4>
+                {components.length === 0 ? (
+                  <p className="text-cyan-200 text-center py-4">
+                    👆 Agrega componentes usando los botones de arriba
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {components.map((comp) => (
+                      <div
+                        key={comp.id}
+                        className="flex items-center gap-3 p-3 rounded-lg bg-slate-900/50 hover:bg-slate-800/50 transition-all"
+                      >
+                        <span className="flex-1 text-sm">
+                          {comp.type === "resistor" && "Resistencia:"}
+                          {comp.type === "capacitor" && "Capacitor:"}
+                          {comp.type === "inductor" && "Inductor:"}
+                          {comp.type === "voltage_source" && "Fuente VDC:"}
+                          {comp.type === "ac_source" && "Fuente VAC:"}
+                          {comp.type === "current_source_dc" && "Fuente IDC:"}
+                          {comp.type === "current_source" && "Fuente IAC:"}
+                        </span>
+                        <input
+                          type="number"
+                          value={comp.value}
+                          onChange={(e) =>
+                            updateComponentValue(comp.id, e.target.value)
+                          }
+                          className="w-20 px-2 py-1 bg-slate-800 border border-cyan-500 rounded text-sm"
+                          step="0.1"
+                          placeholder="Magnitud"
+                        />
+                        <span className="text-xs text-cyan-300 w-8">
+                          {comp.type === "resistor" && "Ω"}
+                          {comp.type === "capacitor" && "j"}
+                          {comp.type === "inductor" && "j"}
+                          {(comp.type === "voltage_source" ||
+                            comp.type === "ac_source") &&
+                            "V"}
+                          {(comp.type === "current_source" ||
+                            comp.type === "current_source_dc") &&
+                            "A"}
+                        </span>
+                        {(comp.type === "ac_source" || comp.type === "current_source") && (
+                          <>
+                            <span className="text-xs text-amber-300">∠</span>
+                            <input
+                              type="number"
+                              value={comp.phase || 0}
+                              onChange={(e) =>
+                                updateComponentPhase(comp.id, e.target.value)
+                              }
+                              className="w-16 px-2 py-1 bg-slate-800 border border-amber-500 rounded text-sm"
+                              step="1"
+                              placeholder="Fase"
+                            />
+                            <span className="text-xs text-amber-300">°</span>
+                          </>
+                        )}
+                        <button
+                          onClick={() => rotateComponent(comp.id)}
+                          className="px-4 py-2 bg-gradient-to-r from-blue-600 to-blue-500 rounded-lg hover:from-blue-500 hover:to-blue-400 text-2xl font-bold shadow-lg transform hover:scale-110 transition-all"
+                          title="Rotar 90° - Click aquí para cambiar orientación"
+                        >
+                          {getOrientationText(comp.rotation)}
+                        </button>
+                        <button
+                          onClick={() => removeComponent(comp.id)}
+                          className="px-2 py-1 bg-red-600 rounded hover:bg-red-500"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Ecuaciones y Resultados - igual que antes */}
+            {meshEquations.length > 0 && (
+              <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-6 border border-cyan-500/30 shadow-xl">
+                <h3 className="text-2xl font-bold text-cyan-300 mb-4">
+                  Ecuaciones de Malla
+                </h3>
+                {meshEquations.map((eq, idx) => (
+                  <div
+                    key={idx}
+                    className="p-4 bg-slate-900/50 rounded-lg mb-3"
+                  >
+                    <p className="text-cyan-200 font-mono text-sm mb-2">
+                      Malla {eq.mesh}: {eq.equation}
+                    </p>
+                    <div className="grid grid-cols-2 gap-4 mt-2">
+                      <div>
+                        <p className="text-green-300 font-mono text-sm">
+                          Rectangular: {formatComplex(eq.current)} A
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-purple-300 font-mono text-sm">
+                          Polar: {formatPolar(eq.current)} A
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {circuitResult && (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="bg-gradient-to-br from-cyan-900/40 to-cyan-800/40 backdrop-blur-sm rounded-2xl p-6 border border-cyan-500/30 shadow-xl">
+                    <h3 className="text-xl font-bold text-cyan-300 mb-3">
+                      Impedancia Total
+                    </h3>
+                    <div className="space-y-2">
+                      <p className="text-cyan-200 font-mono text-sm">
+                        Rectangular:
+                      </p>
+                      <p className="text-cyan-100 font-mono font-bold">
+                        {formatComplex(circuitResult.impedance)} Ω
+                      </p>
+                      <p className="text-cyan-200 font-mono text-sm">Polar:</p>
+                      <p className="text-cyan-100 font-mono font-bold">
+                        {formatPolar(circuitResult.impedance)} Ω
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-blue-900/40 to-blue-800/40 backdrop-blur-sm rounded-2xl p-6 border border-blue-500/30 shadow-xl">
+                    <h3 className="text-xl font-bold text-blue-300 mb-3">
+                      Corriente
+                    </h3>
+                    <div className="space-y-2">
+                      <p className="text-blue-200 font-mono text-sm">
+                        Rectangular:
+                      </p>
+                      <p className="text-blue-100 font-mono font-bold">
+                        {formatComplex(circuitResult.current)} A
+                      </p>
+                      <p className="text-blue-200 font-mono text-sm">Polar:</p>
+                      <p className="text-blue-100 font-mono font-bold">
+                        {formatPolar(circuitResult.current)} A
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-purple-900/40 to-purple-800/40 backdrop-blur-sm rounded-2xl p-6 border border-purple-500/30 shadow-xl">
+                    <h3 className="text-xl font-bold text-purple-300 mb-3">
+                      Ángulo de Fase
+                    </h3>
+                    <div className="p-4 bg-purple-950/50 rounded-lg">
+                      <p className="text-purple-200 font-mono text-2xl font-bold text-center">
+                        {circuitResult.phase.toFixed(2)}°
+                      </p>
+                      <p className="text-purple-300 text-sm text-center mt-2">
+                        {circuitResult.phase > 0
+                          ? "Inductivo"
+                          : circuitResult.phase < 0
+                          ? "Capacitivo"
+                          : "Resistivo"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-green-900/40 to-green-800/40 backdrop-blur-sm rounded-2xl p-6 border border-green-500/30 shadow-xl">
+                    <h3 className="text-xl font-bold text-green-300 mb-3">
+                      Factor de Potencia
+                    </h3>
+                    <div className="p-4 bg-green-950/50 rounded-lg">
+                      <p className="text-green-200 font-mono text-2xl font-bold text-center">
+                        {circuitResult.powerFactor.toFixed(4)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Diagrama Fasorial */}
+                <div className="bg-slate-800/30 backdrop-blur-sm rounded-2xl p-6 border border-cyan-500/30 shadow-xl">
+                  <h3 className="text-2xl font-bold text-cyan-300 mb-4 text-center">
+                    Diagrama Fasorial
+                  </h3>
+                  <div className="flex justify-center">
+                    <svg
+                      width="600"
+                      height="600"
+                      className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-xl"
+                    >
+                      <defs>
+                        <pattern
+                          id="gridFasor"
+                          width="40"
+                          height="40"
+                          patternUnits="userSpaceOnUse"
+                        >
+                          <path
+                            d="M 40 0 L 0 0 0 40"
+                            fill="none"
+                            stroke="rgba(100,116,139,0.3)"
+                            strokeWidth="0.5"
+                          />
+                        </pattern>
+                        <marker
+                          id="arrowVoltage"
+                          markerWidth="10"
+                          markerHeight="10"
+                          refX="9"
+                          refY="3"
+                          orient="auto"
+                        >
+                          <path d="M0,0 L0,6 L9,3 z" fill="#ef4444" />
+                        </marker>
+                        <marker
+                          id="arrowCurrent"
+                          markerWidth="10"
+                          markerHeight="10"
+                          refX="9"
+                          refY="3"
+                          orient="auto"
+                        >
+                          <path d="M0,0 L0,6 L9,3 z" fill="#3b82f6" />
+                        </marker>
+                      </defs>
+
+                      <rect width="600" height="600" fill="url(#gridFasor)" />
+
+                      <line
+                        x1="0"
+                        y1="300"
+                        x2="600"
+                        y2="300"
+                        stroke="rgba(148,163,184,0.5)"
+                        strokeWidth="2"
+                      />
+                      <line
+                        x1="300"
+                        y1="0"
+                        x2="300"
+                        y2="600"
+                        stroke="rgba(148,163,184,0.5)"
+                        strokeWidth="2"
+                      />
+
+                      {[50, 100, 150, 200].map((r) => (
+                        <circle
+                          key={r}
+                          cx="300"
+                          cy="300"
+                          r={r}
+                          fill="none"
+                          stroke="rgba(100,116,139,0.2)"
+                          strokeWidth="1"
+                          strokeDasharray="3,3"
+                        />
+                      ))}
+
+                      <line
+                        x1="300"
+                        y1="300"
+                        x2="500"
+                        y2="300"
+                        stroke="#ef4444"
+                        strokeWidth="4"
+                        markerEnd="url(#arrowVoltage)"
+                      />
+                      <text
+                        x="510"
+                        y="300"
+                        fill="#ef4444"
+                        fontSize="16"
+                        fontWeight="bold"
+                      >
+                        V = {circuitResult.voltage}V∠0°
+                      </text>
+
+                      {(() => {
+                        const angle =
+                          (-circuitResult.currentPhase * Math.PI) / 180;
+                        const length = 180;
+                        const x2 = 300 + length * Math.cos(angle);
+                        const y2 = 300 - length * Math.sin(angle);
+                        return (
+                          <>
+                            <line
+                              x1="300"
+                              y1="300"
+                              x2={x2}
+                              y2={y2}
+                              stroke="#3b82f6"
+                              strokeWidth="4"
+                              markerEnd="url(#arrowCurrent)"
+                            />
+                            <text
+                              x={x2 + 15}
+                              y={y2 + 5}
+                              fill="#3b82f6"
+                              fontSize="16"
+                              fontWeight="bold"
+                            >
+                              I = {circuitResult.currentMag.toFixed(2)}A∠
+                              {circuitResult.currentPhase.toFixed(1)}°
+                            </text>
+
+                            {circuitResult.currentPhase !== 0 && (
+                              <>
+                                <path
+                                  d={`M ${300 + 60} 300 A 60 60 0 0 ${
+                                    circuitResult.currentPhase < 0 ? 1 : 0
+                                  } ${300 + 60 * Math.cos(angle)} ${
+                                    300 - 60 * Math.sin(angle)
+                                  }`}
+                                  fill="none"
+                                  stroke="#a855f7"
+                                  strokeWidth="2"
+                                  strokeDasharray="3,3"
+                                />
+                                <text
+                                  x="370"
+                                  y={
+                                    circuitResult.currentPhase < 0
+                                      ? "315"
+                                      : "285"
+                                  }
+                                  fill="#a855f7"
+                                  fontSize="14"
+                                  fontWeight="bold"
+                                >
+                                  φ ={" "}
+                                  {Math.abs(circuitResult.currentPhase).toFixed(
+                                    1
+                                  )}
+                                  °
+                                </text>
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
+
+                      <text
+                        x="580"
+                        y="310"
+                        fill="#94a3b8"
+                        fontSize="14"
+                        fontWeight="bold"
+                      >
+                        Re
+                      </text>
+                      <text
+                        x="310"
+                        y="20"
+                        fill="#94a3b8"
+                        fontSize="14"
+                        fontWeight="bold"
+                      >
+                        Im
+                      </text>
+                    </svg>
+                  </div>
+                  <div className="mt-6 flex justify-center gap-8 text-sm">
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-1 bg-red-500"></div>
+                      <span className="text-red-300 font-bold">
+                        Voltaje
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-1 bg-blue-500"></div>
+                      <span className="text-blue-300 font-bold">Corriente</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 grid grid-cols-3 gap-4">
+                    <div className="bg-amber-900/30 p-4 rounded-xl border border-amber-500/30">
+                      <p className="text-amber-300 text-sm mb-1">
+                        Potencia Aparente
+                      </p>
+                      <p className="text-amber-100 font-mono font-bold text-xl">
+                        {circuitResult.apparentPower.toFixed(2)} VA
+                      </p>
+                    </div>
+                    <div className="bg-green-900/30 p-4 rounded-xl border border-green-500/30">
+                      <p className="text-green-300 text-sm mb-1">
+                        Potencia Activa
+                      </p>
+                      <p className="text-green-100 font-mono font-bold text-xl">
+                        {circuitResult.activePower.toFixed(2)} W
+                      </p>
+                    </div>
+                    <div className="bg-purple-900/30 p-4 rounded-xl border border-purple-500/30">
+                      <p className="text-purple-300 text-sm mb-1">
+                        Potencia Reactiva
+                      </p>
+                      <p className="text-purple-100 font-mono font-bold text-xl">
+                        {circuitResult.reactivePower.toFixed(2)} VAR
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </>
             )}
           </div>
         )}
